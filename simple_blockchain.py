@@ -1,9 +1,12 @@
 # coding=utf-8
 import uuid
+from urllib.parse import urlparse
 
 import hashlib
 import json
 from time import time
+
+import requests
 from flask import Flask, request
 
 
@@ -20,6 +23,8 @@ class Blockchain(object):
         self.chain = []
         # 交易信息
         self.current_transaction = []
+        # 节点
+        self.nodes = set()
 
         # 创建创世块
         self.new_block(previous_hash='1', proof=100)
@@ -107,6 +112,74 @@ class Blockchain(object):
         print(f'当前:{proof} 结果:{guess_hash}')
         return guess_hash[:4] == '0000'
 
+    def register_node(self, address):
+        """
+        添加新的节点到节点列表
+        :param address:<str>节点地址
+        :return:None
+        """
+        parsed_url = urlparse(address)
+        self.nodes.add(parsed_url.netloc)
+
+    def valid_chain(self, chain):
+        """
+        确定给定的区块链是否有效
+        用来检查是否是有效链，遍历每个块验证hash和proof.
+        :param chain:<list>一个区块链
+        :return:<bool> True if valid, False if not
+        """
+        last_block = chain[0]
+        current_index = 1
+        while current_index < len(chain):
+            block = chain[current_index]
+            print(f'{last_block}')
+            print(f'{block}')
+            print("\n-------\n")
+
+            # 检查工作证明是否正确
+            if block['previous_hash'] != self.hash(last_block):
+                return False
+
+            if not self.valid_proof(last_block['proof'], block['proof']):
+                return False
+
+            last_block = block
+            current_index += 1
+
+        return True
+
+    def resolve_conflicts(self):
+        """
+        公式算法解决冲突, 使用网络中最长的链
+        用来解决冲突，遍历所有的邻居节点，并用上一个方法检查链的有效性， 如果发现有效更长链，就替换掉自己的链
+        :return:<bool> True  如果链被取代, 否则为False
+        """
+        neighbour = self.nodes
+        new_chain = None
+
+        # 仅查找比自身更长的链
+        max_length = len(self.chain)
+
+        # 从网络中的所有节点获取并验证链
+        for node in neighbour:
+            response = requests.get(f'http://{node}/chain')
+
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+
+            # 检查长度是否较长，链是否有效
+            if length > max_length and self.valid_chain(chain):
+                max_length = length
+                new_chain = chain
+
+        # 如果我们发现一个新的、有效的链比我们的长，就替换我们的链
+        if new_chain:
+            self.chain = new_chain
+            return True
+
+        return False
+
 
 # 创建一个节点
 app = Flask(__name__)
@@ -173,6 +246,52 @@ def full_chain():
     return json.dumps(response), 200
 
 
+"""
+让我们添加两个路由，一个用来注册节点，一个用来解决冲突。
+你可以在不同的机器运行节点，或在一台机机开启不同的网络端口来模拟多节点的网络，
+这里在同一台机器开启不同的端口演示，在不同的终端运行一下命令，
+就启动了两个节点：http://localhost:5000 和 http://localhost:5001
+"""
+
+
+# 注册节点的路由
+@app.route('/nodes/register', methods=['POST'])
+def register_nodes():
+    values = request.get_json()
+    nodes = values.get('nodes')
+    if nodes is None:
+        return "Error: Please supply a valid list of nodes", 400
+
+    for node in nodes:
+        blockchain.register_node(node)
+
+    response = {
+        'message'    : 'New nodes have been added',
+        'total_nodes': list(blockchain.nodes),
+    }
+    return json.dumps(response), 201
+
+
+# 来解决冲突的路由
+@app.route('/nodes/resolve', methods=['GET'])
+def consensus():
+    replaced = blockchain.resolve_conflicts()
+
+    if replaced:
+        response = {
+            'message'  : 'Our chain was replaced',
+            'new_chain': blockchain.chain
+        }
+
+    else:
+        response = {
+            'message': 'Our chain is authoritative',
+            'chain'  : blockchain.chain
+        }
+
+    return json.dumps(response), 201
+
+
 if __name__ == '__main__':
     # 服务运行在端口5000上.
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5001)
